@@ -1,0 +1,98 @@
+import torch
+import cv2
+import time
+import numpy as np
+from ptflops import get_model_complexity_info
+
+# Check GPU usage
+!nvidia-smi
+
+# Load the model
+model_path = "YOLOv11n_Weight.pt"  # Adjust to your file path
+model_data = torch.load(model_path, map_location="cuda" if torch.cuda.is_available() else "cpu")
+model = model_data['ema']
+model = model.float()  # Convert to FP32 initially
+model.eval()  # Set to evaluation mode
+
+# Check if GPU is available and move model to GPU
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = model.to(device)
+
+# Convert model to FP16 for faster inference (optional)
+model = model.half()  # Convert to FP16 for optimization
+
+# Open the video file or webcam (use 0 for webcam)
+video_path = "path/to/your/video.mp4" # Adjust to your video file path
+cap = cv2.VideoCapture(video_path)
+
+# Check if the video opened successfully
+if not cap.isOpened():
+    print("Error: Could not open video.")
+    exit()
+
+# Get the video's frame rate (FPS)
+video_fps = cap.get(cv2.CAP_PROP_FPS)
+print(f"Video FPS: {video_fps:.2f}")
+
+# Initialize frame processing
+batch_size = 8
+frames_batch = []
+num_frames = 0
+start_time = time.time()
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break  # If no frame is returned, we've reached the end of the video
+
+    # Resize and store frames for batch processing
+    frame_resized = cv2.resize(frame, (320, 320))  # Resize to 320x320
+    frames_batch.append(frame_resized)
+
+    # Process the batch when the batch is full
+    if len(frames_batch) == batch_size:
+        # Convert frames to tensor and change shape from HWC to CHW (3, 320, 320)
+        frame_tensor_batch = torch.tensor(np.array(frames_batch)).float().to(device)
+        frame_tensor_batch = frame_tensor_batch.permute(0, 3, 1, 2)  # Convert from HWC to CHW
+        frame_tensor_batch = frame_tensor_batch.half()  # Convert to FP16
+
+        # Process batch with the model
+        with torch.no_grad():
+            model(frame_tensor_batch)  # Forward pass through the model
+
+        # Reset batch
+        frames_batch = []
+
+    num_frames += 1
+
+# Calculate FPS based on total processing time
+end_time = time.time()
+fps_video = num_frames / (end_time - start_time)
+latency = (end_time - start_time) / num_frames * 1000  # in ms
+
+print(f"FPS for video processing: {fps_video:.2f}")
+print(f"Latency per frame: {latency:.3f} ms")
+
+# Model size
+total_params = sum(p.numel() for p in model.parameters())
+print(f"Model Size: {total_params / 1e6:.2f}M parameters")
+
+# Use ptflops to calculate FLOPs
+with torch.no_grad():
+    macs, params = get_model_complexity_info(model, (3, 320, 320), as_strings=True, verbose=True)
+
+print(f"FLOPs: {macs}")
+
+# To calculate the theoretical complexity (Big O or Complex O):
+# The Big O complexity for the forward pass is often equivalent to the FLOPs calculated
+# The actual formula for Big O complexity will be summarized below
+
+# Big O Complexity (Complex O) for each convolutional layer can be approximated as:
+# O(K^2 * C_in * C_out * H_out * W_out), but since FLOPs captures that, it's effectively the same for practical use.
+
+# Final Output:
+print(f"Complex O (Big O notation equivalent for this model): O({macs})")
+
+# Release the video capture object and close any open windows
+cap.release()
+cv2.destroyAllWindows()
