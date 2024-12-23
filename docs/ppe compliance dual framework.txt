@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Sat Dec  7 13:31:40 2024
+
+@author: aishahassan
+"""
+
+import cv2
+from ultralytics import YOLO
+import subprocess  # For macOS notifications
+
+# Load both YOLO models
+model_ppe = YOLO("YOLOv11n_Weight.pt")  # Model for safety helmets/vests
+model_person = YOLO("Person_Detection_weight.pt")  # Model for person detection
+
+# Open the video file
+#To test the model, provide your own video path in the `video_path` variable in the Python script.
+video_path = "path/to/your/video.mp4"
+cap = cv2.VideoCapture(video_path)
+
+# Define output video writer for saving annotated video
+output_path = "path/to/your/video.mp4"  # Change this path to your desired location
+fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+out = cv2.VideoWriter(output_path, fourcc, 30.0, (640, 640))
+
+# Function to send macOS notifications
+def send_mac_notification(title, message):
+    script = f'display notification "{message}" with title "{title}"'
+    subprocess.run(["osascript", "-e", script])
+
+# Function to calculate IoU (Intersection-over-Union)
+def calculate_iou(boxA, boxB):
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+
+    interArea = max(0, xB - xA + 1) * max(0, yB - yA + 1)
+    boxAArea = (boxA[2] - boxA[0] + 1) * (boxA[3] - boxA[1] + 1)
+    boxBArea = (boxB[2] - boxB[0] + 1) * (boxB[3] - boxB[1] + 1)
+
+    iou = interArea / float(boxAArea + boxBArea - interArea)
+    return iou
+
+# Loop through video frames
+while cap.isOpened():
+    success, frame = cap.read()
+    if not success:
+        break  # End of video
+
+    # Get the original dimensions of the frame
+    h, w, _ = frame.shape
+
+    # Resize the frame for consistency while maintaining aspect ratio
+    target_size = 640
+    scale = target_size / max(h, w)
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+
+    # Resize the frame while preserving the aspect ratio
+    resized_frame = cv2.resize(frame, (new_w, new_h))
+
+    # Calculate padding to ensure the frame is square (640x640)
+    top = (target_size - new_h) // 2
+    bottom = target_size - new_h - top
+    left = (target_size - new_w) // 2
+    right = target_size - new_w - left
+
+    # Add padding (black padding by default)
+    padded_frame = cv2.copyMakeBorder(resized_frame, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+
+    # Run inference with both models
+    results_ppe = model_ppe(padded_frame, conf=0.4, iou=0.4)  # PPE detection
+    results_person = model_person(padded_frame, conf=0.3, iou=0.3)  # Person detection
+
+    # Process PPE detections (safety helmets and vests)
+    ppe_boxes = []
+    for det in results_ppe[0].boxes.data:
+        # Extract bounding box, class, and confidence
+        x1, y1, x2, y2, conf, cls = det.tolist()
+        cls_name = results_ppe[0].names[int(cls)]
+        if cls_name in ["Safety Helmet", "Safety Vest"] and conf >= 0.3:
+            ppe_boxes.append((x1, y1, x2, y2, cls_name, conf))
+
+    # Process person detections
+    person_boxes = []
+    for det in results_person[0].boxes.data:
+        # Extract bounding box, class, and confidence
+        x1, y1, x2, y2, conf, cls = det.tolist()
+        cls_name = results_person[0].names[int(cls)]
+        if cls_name == "person" and conf >= 0.3:
+            person_boxes.append((x1, y1, x2, y2, conf))
+
+    # Post-process: Match person boxes with PPE boxes
+    for px1, py1, px2, py2, person_conf in person_boxes:
+        person_detected = False
+        for bx1, by1, bx2, by2, ppe_type, ppe_conf in ppe_boxes:
+            if calculate_iou((px1, py1, px2, py2), (bx1, by1, bx2, by2)) > 0.5:
+                person_detected = True
+
+        # If a person is detected without PPE, annotate it and send a notification
+        if not person_detected:
+            cv2.rectangle(padded_frame, (int(px1), int(py1)), (int(px2), int(py2)), (0, 0, 255), 2)
+            cv2.putText(padded_frame, "No PPE!", (int(px1), int(py1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+            # Send a desktop notification for "No PPE"
+            send_mac_notification('Safety Alert', 'A person was detected without PPE!')
+
+    # Visualize all detections
+    for x1, y1, x2, y2, cls_name, conf in ppe_boxes:
+        color = (0, 255, 0) if cls_name == "Safety Helmet" else (255, 165, 0)
+        cv2.rectangle(padded_frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+        cv2.putText(padded_frame, f"{cls_name}: {conf:.2f}", (int(x1), int(y1) - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+    for px1, py1, px2, py2, person_conf in person_boxes:
+        cv2.rectangle(padded_frame, (int(px1), int(py1)), (int(px2), int(py2)), (255, 0, 0), 2)
+        cv2.putText(padded_frame, f"Person: {person_conf:.2f}", (int(px1), int(py1) - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+    # Save the frame to output video
+    out.write(padded_frame)
+
+    # Optionally display the annotated frame
+    cv2.imshow("YOLO Inference", padded_frame)
+
+    # Exit if 'q' is pressed
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+        break
+
+# Release resources
+cap.release()
+out.release()
+cv2.destroyAllWindows()
